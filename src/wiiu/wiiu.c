@@ -38,6 +38,7 @@ static uint32_t queueWriteIndex;
 static uint32_t queueReadIndex;
 static yuv_texture_t* renderingFrame;
 static uint32_t nextDecodeTexture;
+static uint32_t droppedQueueFrames;
 
 void wiiu_stream_init(uint32_t width, uint32_t height)
 {
@@ -47,6 +48,7 @@ void wiiu_stream_init(uint32_t width, uint32_t height)
   queueReadIndex = queueWriteIndex = 0;
   renderingFrame = NULL;
   nextDecodeTexture = 0;
+  droppedQueueFrames = 0;
 
   if (!WHBGfxLoadGFDShaderGroup(&shaderGroup, 0, display_gsh)) {
     printf("Cannot load shader\n");
@@ -174,6 +176,7 @@ void wiiu_stream_reset(void)
   queueReadIndex = queueWriteIndex = 0;
   renderingFrame = NULL;
   nextDecodeTexture = 0;
+  droppedQueueFrames = 0;
   OSFastMutex_Unlock(&queueMutex);
 }
 
@@ -194,6 +197,14 @@ void* get_frame(void)
 
   OSFastMutex_Unlock(&queueMutex);
   return message;
+}
+
+uint32_t wiiu_stream_dropped_frames(void)
+{
+  OSFastMutex_Lock(&queueMutex);
+  uint32_t dropped = droppedQueueFrames;
+  OSFastMutex_Unlock(&queueMutex);
+  return dropped;
 }
 
 void wiiu_stream_release_frame(yuv_texture_t* frame)
@@ -238,6 +249,7 @@ yuv_texture_t* wiiu_stream_acquire_decode_texture(void)
     if (queueWriteIndex == queueReadIndex)
       break; // All textures unexpectedly unavailable.
     ++queueReadIndex; // Evict the oldest queued frame.
+    ++droppedQueueFrames;
   }
 
   OSFastMutex_Unlock(&queueMutex);
@@ -254,8 +266,10 @@ void add_frame(yuv_texture_t* msg)
 
   // Keep the newest decoded frame; dropping the incoming frame instead
   // causes visible stalls and increases age of frames still in the queue.
-  while (queueWriteIndex - queueReadIndex >= limit)
+  while (queueWriteIndex - queueReadIndex >= limit) {
     ++queueReadIndex;
+    ++droppedQueueFrames;
+  }
 
   uint32_t i = (queueWriteIndex)++ & (MAX_QUEUEMESSAGES_MAX - 1);
   queueMessages[i] = msg;
