@@ -28,13 +28,41 @@ extern int benchmark_total_frames;
 #define H264_FRAME_HEIGHT(h) (((h) + 0xf) & ~0xf)
 #define H264_MAX_FRAME_SIZE H264_FRAME_SIZE(H264_FRAME_PITCH(2800), 1408)
 
-#define DECODER_BUFFER_SIZE 92*1024
+// Encoded H.264 IDR frames are bursty and can greatly exceed their
+// average per-frame size at 10-20 Mbps. Grow an aligned buffer as needed.
+#define DECODER_INITIAL_BUFFER_SIZE (256 * 1024)
+#define DECODER_MAX_BUFFER_SIZE (2 * 1024 * 1024)
 
 yuv_texture_t textures[NUM_BUFFERS];
-uint32_t currentTexture;
-
 static void* decoder;
 static char* decodebuffer;
+static size_t decodebufferCapacity;
+
+// Avoid discarding valid keyframes simply because they exceed a small
+// fixed packet buffer. The decoder requires 0x400-aligned memory.
+static int ensure_decode_capacity(size_t required)
+{
+  if (required <= decodebufferCapacity)
+    return 0;
+  if (required > DECODER_MAX_BUFFER_SIZE)
+    return -1;
+
+  size_t capacity = decodebufferCapacity ?
+      decodebufferCapacity : DECODER_INITIAL_BUFFER_SIZE;
+  while (capacity < required)
+    capacity *= 2;
+
+  char* resized = memalign(H264_MEM_ALIGNMENT, capacity + 64);
+  if (resized == NULL)
+    return -1;
+
+  free(decodebuffer);
+  decodebuffer = resized;
+  decodebufferCapacity = capacity;
+  printf("h264_wiiu: Expanded bitstream buffer to %u bytes\n",
+         (unsigned int)capacity);
+  return 0;
+}
 
 static void frame_callback(H264DecodeOutput *output) { }
 
@@ -139,13 +167,12 @@ static int wiiu_decoder_setup(int videoFormat, int width, int height, int redraw
       return -1;
     }
   }
-  currentTexture = 0;
-
-  decodebuffer = memalign(H264_MEM_ALIGNMENT, DECODER_BUFFER_SIZE + 64);
+  decodebuffer = memalign(H264_MEM_ALIGNMENT, DECODER_INITIAL_BUFFER_SIZE + 64);
   if (decodebuffer == NULL) {
     fprintf(stderr, "Not enough memory\n");
     return -1;
   }
+  decodebufferCapacity = DECODER_INITIAL_BUFFER_SIZE;
 
   return 0;
 }
@@ -159,6 +186,7 @@ static void wiiu_decoder_cleanup() {
   decoder = NULL;
   free(decodebuffer);
   decodebuffer = NULL;
+  decodebufferCapacity = 0;
 
   for (int i = 0; i < NUM_BUFFERS; i++) {
     free(textures[i].yTex.surface.image);
@@ -167,17 +195,35 @@ static void wiiu_decoder_cleanup() {
 }
 
 static int wiiu_decoder_submit_decode_unit(PDECODE_UNIT decodeUnit) {
-  if (decodeUnit->fullLength > DECODER_BUFFER_SIZE) {
-    fprintf(stderr, "Video decode buffer too small\n");
-    return DR_OK;
+  if (decodeUnit == NULL || decodeUnit->fullLength <= 0)
+    return DR_NEED_IDR;
+
+  size_t expected = (size_t)decodeUnit->fullLength;
+  if (ensure_decode_capacity(expected) != 0) {
+    fprintf(stderr, "h264_wiiu: Bitstream too large (%u bytes)\n",
+            (unsigned int)expected);
+    if (benchmark_running) benchmark_decode_errors++;
+    return DR_NEED_IDR;
   }
 
+  // Validate the scatter/gather lengths before writing to the buffer.
   PLENTRY entry = decodeUnit->bufferList;
-  int length = 0;
+  size_t length = 0;
   while (entry != NULL) {
-    memcpy(decodebuffer+length, entry->data, entry->length);
-    length += entry->length;
+    size_t chunk = (size_t)entry->length;
+    if (chunk > expected - length) {
+      fprintf(stderr, "h264_wiiu: Invalid decode unit length\n");
+      if (benchmark_running) benchmark_decode_errors++;
+      return DR_NEED_IDR;
+    }
+    memcpy(decodebuffer + length, entry->data, chunk);
+    length += chunk;
     entry = entry->next;
+  }
+  if (length != expected) {
+    fprintf(stderr, "h264_wiiu: Incomplete decode unit\n");
+    if (benchmark_running) benchmark_decode_errors++;
+    return DR_NEED_IDR;
   }
 
   // Track bytes for benchmark average bitrate calculation
@@ -192,7 +238,12 @@ static int wiiu_decoder_submit_decode_unit(PDECODE_UNIT decodeUnit) {
     return DR_NEED_IDR;
   }
 
-  yuv_texture_t* tex = &textures[currentTexture];
+  yuv_texture_t* tex = wiiu_stream_acquire_decode_texture();
+  if (tex == NULL) {
+    fprintf(stderr, "h264_wiiu: No free decode texture\n");
+    if (benchmark_running) benchmark_decode_errors++;
+    return DR_NEED_IDR;
+  }
 
   res = H264DECExecute(decoder, tex->yTex.surface.image);
   if ((res & ~0xff) != 0) {
@@ -209,12 +260,6 @@ static int wiiu_decoder_submit_decode_unit(PDECODE_UNIT decodeUnit) {
   }
 
   add_frame(tex);
-
-  currentTexture++;
-
-  if (currentTexture >= NUM_BUFFERS) {
-    currentTexture = 0;
-  }
 
   return DR_OK;
 }
