@@ -192,7 +192,7 @@ static void profile_set_defaults(profile_t *p, int idx) {
     p->packetSize = 1024;
     p->colorSpace = COLORSPACE_REC_709;
     p->colorRange = COLOR_RANGE_FULL;
-    p->max_queued_frames = 4;
+    p->max_queued_frames = 2;
     p->rotate = 0;
     p->audio_configuration = AUDIO_CONFIGURATION_STEREO;
     p->audio_buffer_samples = 4096;
@@ -287,7 +287,9 @@ static void profile_load(int idx, PCONFIGURATION cfg) {
     cfg->stream.colorRange = p->colorRange;
     cfg->stream.audioConfiguration = p->audio_configuration;
     cfg->rotate = p->rotate;
-    max_queued_frames = p->max_queued_frames;
+    // Migrate old profiles (2/4/8) to the safe 1..3 texture queue.
+    max_queued_frames = p->max_queued_frames < 1 ? 2 :
+        (p->max_queued_frames > NUM_BUFFERS - 1 ? NUM_BUFFERS - 1 : p->max_queued_frames);
 
     // Audio
     cfg->localaudio = p->localaudio;
@@ -515,6 +517,7 @@ int benchmark_running = 0; // non-static: used from decode.c
 static uint32_t benchmark_rtt_avg = 0;
 static uint32_t benchmark_rtt_variance = 0;
 static int benchmark_poor_count = 0;
+static uint32_t benchmark_queue_drops = 0;
 static int benchmark_okay_count = 0;
 int benchmark_total_frames = 0;       // non-static: used from decode.c
 int benchmark_decode_errors = 0;      // non-static: used from decode.c
@@ -1470,11 +1473,11 @@ int main(int argc, char *argv[]) {
                     : COLOR_RANGE_FULL;
             break;
           }
-          case 5: { // Max Queued Frames - cycle 2 → 4 → 8 → 2
-            static const int qf_presets[] = {2, 4, 8};
+          case 5: { // Max Queued Frames - cycle 1 -> 2 -> 3 -> 1
+            static const int qf_presets[] = {1, 2, 3};
             int qi = 0;
-            if (max_queued_frames == 4) qi = 1;
-            else if (max_queued_frames == 8) qi = 2;
+            if (max_queued_frames == 2) qi = 1;
+            else if (max_queued_frames == 3) qi = 2;
             qi = (qi + 1) % 3;
             max_queued_frames = qf_presets[qi];
             break;
@@ -2641,7 +2644,9 @@ int main(int argc, char *argv[]) {
         LiStopConnection();
         wiiu_rumble_stop(); // Ensure motor is off after connection is gone
 
-        // Reset frame queue for next stream (benchmark re-stream or normal)
+        // Save the queue-drop count before resetting for the next stream.
+        if (benchmark_running)
+          benchmark_queue_drops = wiiu_stream_dropped_frames();
         wiiu_stream_reset();
 
         // Clear disconnecting flag; only wipe error state on user-initiated
@@ -2821,6 +2826,14 @@ int main(int argc, char *argv[]) {
         Font_SetSize(32);
         Font_Print(40, 695, frame_str);
       }
+
+      // Queue drops are distinct from missing network packets or H.264
+      // decode errors. A rising count points to client-side render backlog.
+      Font_SetColor(theme_label_r, theme_label_g, theme_label_b, theme_label_a);
+      Font_SetSize(32);
+      Font_Print(40, 755, "Client Queue Drops:");
+      Font_SetColor(theme_title_r, theme_title_g, theme_title_b, theme_title_a);
+      Font_Printf(40, 795, "%u frames", (unsigned int)benchmark_queue_drops);
 
       // Bottom bar - fixed position
       Font_SetColor(theme_divider_r, theme_divider_g, theme_divider_b, theme_divider_a);
