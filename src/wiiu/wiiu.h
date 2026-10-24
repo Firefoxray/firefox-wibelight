@@ -46,11 +46,13 @@ void wiiu_stream_fini(void);
 void wiiu_stream_reset(void);          // Reset frame queue between streams
 void wiiu_setup_renderstate(void);
 
-#define NUM_BUFFERS 2
-#define MAX_QUEUEMESSAGES_MAX 8        // Hard max for the ring buffer allocation
+// Four output textures allow one being rendered, up to two queued, and one
+// available for the decoder. A queue deeper than NUM_BUFFERS - 1 is unsafe.
+#define NUM_BUFFERS 4
+#define MAX_QUEUEMESSAGES_MAX 8        // Ring capacity; must be a power of two
 
-// Runtime queue depth (set from UI, defaults to 4)
-// Presets: 2 (low latency), 4 (default), 8 (max buffering)
+// Runtime queue depth (set from UI, defaults to 2)
+// Presets: 1 (lowest latency), 2 (default), 3 (more buffering)
 extern int max_queued_frames;
 
 typedef struct {
@@ -60,6 +62,10 @@ typedef struct {
 
 void *get_frame(void);
 void add_frame(yuv_texture_t *msg);
+// Decode directly into an output texture not queued for display or in use
+// by the renderer. Must be called on the decoder thread.
+yuv_texture_t *wiiu_stream_acquire_decode_texture(void);
+void wiiu_stream_release_frame(yuv_texture_t *msg);
 
 extern volatile uint32_t nextFrame;
 
