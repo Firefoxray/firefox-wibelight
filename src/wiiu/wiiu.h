@@ -66,6 +66,7 @@ void add_frame(yuv_texture_t *msg);
 // by the renderer. Must be called on the decoder thread.
 yuv_texture_t *wiiu_stream_acquire_decode_texture(void);
 void wiiu_stream_release_frame(yuv_texture_t *msg);
+uint32_t wiiu_stream_dropped_frames(void);
 
 extern volatile uint32_t nextFrame;
 
