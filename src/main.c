@@ -2827,6 +2827,14 @@ int main(int argc, char *argv[]) {
         Font_Print(40, 695, frame_str);
       }
 
+      // Queue drops are distinct from missing network packets or H.264
+      // decode errors. A rising count points to client-side render backlog.
+      Font_SetColor(theme_label_r, theme_label_g, theme_label_b, theme_label_a);
+      Font_SetSize(32);
+      Font_Print(40, 755, "Client Queue Drops:");
+      Font_SetColor(theme_title_r, theme_title_g, theme_title_b, theme_title_a);
+      Font_Printf(40, 795, "%u frames", (unsigned int)benchmark_queue_drops);
+
       // Bottom bar - fixed position
       Font_SetColor(theme_divider_r, theme_divider_g, theme_divider_b, theme_divider_a);
       Font_DrawHLine(0, 1920, BAR_DIVIDER_Y);
