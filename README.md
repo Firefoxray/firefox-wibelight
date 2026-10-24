@@ -80,12 +80,20 @@ Moonlight lets you stream your full collection of games and applications from yo
 Requires [devkitPPC](https://devkitpro.org/) with Wii U support.
 
 ```bash
-git clone --recursive https://github.com/dougheater/wibelight.git
-cd wibelight
+git clone --recursive https://github.com/Firefoxray/firefox-wibelight.git
+cd firefox-wibelight
 make
 ```
 
 The output is placed in `dist/wiiu/apps/wibelight/`. Copy the `wiiu` folder to the root of your SD card.
+
+## Experimental performance work
+
+The `perf/wiiu-stream-pipeline` branch includes safer hardware-decoder
+texture handling, an expandable H.264 input buffer, and separate client
+frame-queue-drop statistics in the benchmark. See
+[Performance testing](docs/performance-testing.md) before comparing 10 Mbps
+or 20 Mbps settings. **Higher bitrates remain unverified on Wii U hardware.**
 
 ## ⚙️ Configuration
 
