@@ -30,12 +30,14 @@ static float drcScreenSize[2];
 uint32_t currentFrame;
 volatile uint32_t nextFrame;
 
-int max_queued_frames = 4; // Runtime queue depth (2/4/8)
+int max_queued_frames = 2; // Runtime queue depth (1/2/3)
 
 static OSFastMutex queueMutex;
 static yuv_texture_t* queueMessages[MAX_QUEUEMESSAGES_MAX];
 static uint32_t queueWriteIndex;
 static uint32_t queueReadIndex;
+static yuv_texture_t* renderingFrame;
+static uint32_t nextDecodeTexture;
 
 void wiiu_stream_init(uint32_t width, uint32_t height)
 {
@@ -43,6 +45,8 @@ void wiiu_stream_init(uint32_t width, uint32_t height)
 
   OSFastMutex_Init(&queueMutex, "");
   queueReadIndex = queueWriteIndex = 0;
+  renderingFrame = NULL;
+  nextDecodeTexture = 0;
 
   if (!WHBGfxLoadGFDShaderGroup(&shaderGroup, 0, display_gsh)) {
     printf("Cannot load shader\n");
@@ -103,10 +107,8 @@ void wiiu_stream_draw(void)
   yuv_texture_t* tex = get_frame();
   if (tex) {
     OSMemoryBarrier();
-    if (++currentFrame <= nextFrame - NUM_BUFFERS) {
-      // display thread is behind decoder, skip frame
-    }
-    else {
+    currentFrame++;
+    {
       WHBGfxBeginRender();
 
       // TV
@@ -149,6 +151,8 @@ void wiiu_stream_draw(void)
 
       WHBGfxFinishRender();
     }
+    // Do not return this texture to the decoder until both draws finish.
+    wiiu_stream_release_frame(tex);
   }
 }
 
@@ -164,8 +168,13 @@ void wiiu_stream_fini(void)
 // Call after LiStopConnection() / decoder cleanup, before next stream starts.
 void wiiu_stream_reset(void)
 {
+  // Called after stopping decoder and rendering threads.
+  OSFastMutex_Lock(&queueMutex);
   currentFrame = nextFrame = 0;
   queueReadIndex = queueWriteIndex = 0;
+  renderingFrame = NULL;
+  nextDecodeTexture = 0;
+  OSFastMutex_Unlock(&queueMutex);
 }
 
 void* get_frame(void)
@@ -180,20 +189,73 @@ void* get_frame(void)
 
   uint32_t i = (queueReadIndex)++ & (MAX_QUEUEMESSAGES_MAX - 1);
   yuv_texture_t* message = queueMessages[i];
+  // The decoder must not reuse this texture while the GPU draws it.
+  renderingFrame = message;
 
   OSFastMutex_Unlock(&queueMutex);
   return message;
+}
+
+void wiiu_stream_release_frame(yuv_texture_t* frame)
+{
+  OSFastMutex_Lock(&queueMutex);
+  if (renderingFrame == frame)
+    renderingFrame = NULL;
+  OSFastMutex_Unlock(&queueMutex);
+}
+
+yuv_texture_t* wiiu_stream_acquire_decode_texture(void)
+{
+  OSFastMutex_Lock(&queueMutex);
+
+  // Never overwrite a texture currently being presented or waiting in
+  // the frame queue. When the decoder outruns rendering, drop the oldest
+  // queued image rather than corrupting it or building up latency.
+  for (;;) {
+    for (uint32_t n = 0; n < NUM_BUFFERS; ++n) {
+      uint32_t idx = (nextDecodeTexture + n) % NUM_BUFFERS;
+      yuv_texture_t* candidate = &textures[idx];
+      if (candidate == renderingFrame)
+        continue;
+
+      bool queued = false;
+      uint32_t queuedCount = queueWriteIndex - queueReadIndex;
+      for (uint32_t j = 0; j < queuedCount; ++j) {
+        if (queueMessages[(queueReadIndex + j) &
+                          (MAX_QUEUEMESSAGES_MAX - 1)] == candidate) {
+          queued = true;
+          break;
+        }
+      }
+
+      if (!queued) {
+        nextDecodeTexture = (idx + 1) % NUM_BUFFERS;
+        OSFastMutex_Unlock(&queueMutex);
+        return candidate;
+      }
+    }
+
+    if (queueWriteIndex == queueReadIndex)
+      break; // All textures unexpectedly unavailable.
+    ++queueReadIndex; // Evict the oldest queued frame.
+  }
+
+  OSFastMutex_Unlock(&queueMutex);
+  return NULL;
 }
 
 void add_frame(yuv_texture_t* msg)
 {
   OSFastMutex_Lock(&queueMutex);
 
-  uint32_t elements_in = queueWriteIndex - queueReadIndex;
-  if (elements_in >= (uint32_t)max_queued_frames) {
-    OSFastMutex_Unlock(&queueMutex);
-    return; // framequeue is full
-  }
+  uint32_t limit = max_queued_frames < 1 ? 1 : (uint32_t)max_queued_frames;
+  if (limit >= NUM_BUFFERS)
+    limit = NUM_BUFFERS - 1;
+
+  // Keep the newest decoded frame; dropping the incoming frame instead
+  // causes visible stalls and increases age of frames still in the queue.
+  while (queueWriteIndex - queueReadIndex >= limit)
+    ++queueReadIndex;
 
   uint32_t i = (queueWriteIndex)++ & (MAX_QUEUEMESSAGES_MAX - 1);
   queueMessages[i] = msg;
