@@ -60,6 +60,9 @@ typedef struct {
   GX2Texture uvTex;
 } yuv_texture_t;
 
+// Allocated and owned by decode.c; consulted by the frame scheduler in wiiu.c.
+extern yuv_texture_t textures[NUM_BUFFERS];
+
 void *get_frame(void);
 void add_frame(yuv_texture_t *msg);
 // Decode directly into an output texture not queued for display or in use
